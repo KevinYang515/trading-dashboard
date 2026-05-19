@@ -25,9 +25,12 @@ def load_data():
         return pd.DataFrame()
 
 def calc_pnl(trades):
-    """計算已實現損益，追蹤平均成本"""
-    position = 0
-    avg_cost = 0.0
+    """計算已實現損益，從第一筆的 pos_before 初始化"""
+    if trades.empty:
+        return 0.0, 0, 0.0
+    first = trades.iloc[0]
+    position = int(first['pos_before']) if pd.notna(first['pos_before']) else 0
+    avg_cost = float(first['signal_price']) if position != 0 and pd.notna(first['signal_price']) else 0.0
     realized = 0.0
 
     for _, row in trades.iterrows():
@@ -79,8 +82,10 @@ selected_date = st.selectbox("選擇日期", options=available_dates, index=defa
 day_df = df[df['date'] == selected_date].copy()
 filled = day_df[day_df['order_status'].str.contains('Filled', na=False)]
 
-# 損益計算
-realized_pnl, cur_pos, avg_cost = calc_pnl(filled)
+# 損益計算（從第一筆的 pos_before 初始化，才能正確計算跨 session 的平倉）
+realized_pnl, _, avg_cost = calc_pnl(filled)
+# 目前部位直接讀最後一筆 target_pos（最準確）
+cur_pos = int(filled.iloc[-1]['target_pos']) if not filled.empty else 0
 
 # 摘要卡片
 c1, c2, c3, c4 = st.columns(4)
