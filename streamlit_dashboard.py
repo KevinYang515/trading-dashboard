@@ -89,10 +89,12 @@ c1.metric("成交筆數", len(filled))
 pnl_str = f"{int(realized_pnl):+,} 元" if len(filled) > 0 else "—"
 c2.metric("今日已實現損益", pnl_str)
 
-pos_str = f"{int(cur_pos)} 口"
-if cur_pos != 0:
-    pos_str += f"（{'多' if cur_pos > 0 else '空'}，均價 {int(avg_cost)}）"
-c3.metric("收盤部位", pos_str)
+if cur_pos == 0:
+    pos_label, pos_delta = "平倉", None
+else:
+    pos_label = f"{'多' if cur_pos > 0 else '空'} {abs(int(cur_pos))} 口"
+    pos_delta = f"均價 {int(avg_cost)}"
+c3.metric("收盤部位", pos_label, delta=pos_delta, delta_color="off")
 
 slip_pts = pd.to_numeric(filled['slippage_pts'], errors='coerce').dropna()
 c4.metric("平均滑價", f"{int(slip_pts.mean()):+d} 點" if len(slip_pts) else "—")
