@@ -1,0 +1,17 @@
+.env
+*.pfx
+*.pem
+venv/
+bin/
+__pycache__/
+*.pyc
+logs/*.log
+logs/supervisord.log
+logs/supervisor.sock
+logs/supervisord.pid
+*.egg-info/
+.DS_Store
+shioaji.log
+pyvenv.cfg
+lib/
+lib64
