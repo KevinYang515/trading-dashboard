@@ -52,7 +52,7 @@ slip_twd = pd.to_numeric(filled['slippage_twd'], errors='coerce').dropna()
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("成交筆數", len(filled))
-c2.metric("平均滑價", f"{slip_pts.mean():+.1f} 點" if len(slip_pts) else "—")
+c2.metric("平均滑價", f"{slip_pts.mean():+.0f} 點" if len(slip_pts) else "—")
 c3.metric("總滑價金額", f"{slip_twd.sum():+.0f} 元" if len(slip_twd) else "—")
 
 net_pos = int(day_df.iloc[-1]['target_pos']) if not day_df.empty else 0
@@ -70,6 +70,13 @@ else:
         'pos_before', 'target_pos', 'order_status'
     ]].copy()
     display['datetime'] = display['datetime'].dt.strftime('%H:%M:%S')
+    for col in ['signal_price', 'fill_price', 'slippage_twd']:
+        display[col] = pd.to_numeric(display[col], errors='coerce').apply(
+            lambda x: int(x) if pd.notna(x) else ''
+        )
+    display['slippage_pts'] = pd.to_numeric(display['slippage_pts'], errors='coerce').apply(
+        lambda x: f"{int(x):+d}" if pd.notna(x) else ''
+    )
     display.columns = [
         '時間', '動作', '合約', '口數',
         '信號價', '成交價', '滑價(點)', '滑價(元)',
