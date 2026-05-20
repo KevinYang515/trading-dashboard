@@ -142,15 +142,18 @@ else:
     st.dataframe(display.style.apply(color_row, axis=1),
                  use_container_width=True, hide_index=True)
 
-# 歷史累積損益曲線
+# 歷史每日損益長條圖
 st.divider()
-st.subheader("歷史累積損益")
+st.subheader("歷史每日損益（元）")
 
 all_filled = df[df['order_status'].str.contains('Filled', na=False)].copy().sort_values('datetime')
 
 if not all_filled.empty and all_filled['fill_price'].notna().any():
-    records = []
-    position, avg_cost, cumulative = 0, 0.0, 0.0
+    # 從第一筆的 pos_before 初始化，避免跨 session 的平倉被誤算
+    first = all_filled.iloc[0]
+    position = int(first['pos_before']) if pd.notna(first['pos_before']) else 0
+    avg_cost = float(first['signal_price']) if position != 0 and pd.notna(first['signal_price']) else 0.0
+    daily_pnl = {}
 
     for _, row in all_filled.iterrows():
         if pd.isna(row['fill_price']):
@@ -158,6 +161,7 @@ if not all_filled.empty and all_filled['fill_price'].notna().any():
         price = float(row['fill_price'])
         qty = int(row['quantity'])
         action = row['action']
+        trade_date = str(row['date'])
         trade_pnl = 0.0
 
         if action == 'BUY':
@@ -167,7 +171,8 @@ if not all_filled.empty and all_filled['fill_price'].notna().any():
                 qty -= close_qty
                 position += close_qty
             if qty > 0:
-                avg_cost = (avg_cost * abs(position) + price * qty) / (abs(position) + qty) if (abs(position) + qty) > 0 else price
+                total = abs(position) + qty
+                avg_cost = (avg_cost * abs(position) + price * qty) / total if total > 0 else price
                 position += qty
         else:
             if position > 0:
@@ -176,15 +181,23 @@ if not all_filled.empty and all_filled['fill_price'].notna().any():
                 qty -= close_qty
                 position -= close_qty
             if qty > 0:
-                avg_cost = (avg_cost * abs(position) + price * qty) / (abs(position) + qty) if (abs(position) + qty) > 0 else price
+                total = abs(position) + qty
+                avg_cost = (avg_cost * abs(position) + price * qty) / total if total > 0 else price
                 position -= qty
 
-        cumulative += trade_pnl
-        records.append({'時間': row['datetime'], '累積損益(元)': int(cumulative)})
+        daily_pnl[trade_date] = daily_pnl.get(trade_date, 0.0) + trade_pnl
 
-    if records:
-        chart_df = pd.DataFrame(records).set_index('時間')
-        st.line_chart(chart_df)
+    if daily_pnl:
+        dates = sorted(daily_pnl.keys())
+        cum, cum_rows = 0.0, []
+        for d in dates:
+            cum += daily_pnl[d]
+            cum_rows.append({'日期': d, '當日損益': int(daily_pnl[d]), '累積損益': int(cum)})
+
+        pnl_df = pd.DataFrame(cum_rows).set_index('日期')
+        st.bar_chart(pnl_df[['當日損益']])
+        st.caption("累積損益")
+        st.line_chart(pnl_df[['累積損益']])
     else:
         st.info("尚無已實現損益資料")
 else:
