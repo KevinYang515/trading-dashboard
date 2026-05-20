@@ -1,17 +1,23 @@
 import streamlit as st
 import pandas as pd
+import requests
+import base64
+import io
 from datetime import datetime, timedelta, timezone
 
 st.set_page_config(page_title="TMF 交易紀錄", page_icon="📈", layout="wide")
 
 TZ_TW = timezone(timedelta(hours=8))
-CSV_URL = "https://raw.githubusercontent.com/KevinYang515/trading-dashboard/main/logs/trade_records.csv"
+API_URL = "https://api.github.com/repos/KevinYang515/trading-dashboard/contents/logs/trade_records.csv"
 TMF_POINT_VALUE = 10
 
 @st.cache_data(ttl=60)
 def load_data():
     try:
-        df = pd.read_csv(CSV_URL)
+        resp = requests.get(API_URL, timeout=10)
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()['content']).decode('utf-8-sig')
+        df = pd.read_csv(io.StringIO(content))
         if df.empty:
             return df
         df['datetime'] = pd.to_datetime(df['datetime'])
