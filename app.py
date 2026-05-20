@@ -2,6 +2,7 @@ import shioaji as sj
 from shioaji.constant import Action, OrderType, FuturesOCType, FuturesPriceType
 from flask import Flask, request, jsonify
 import threading
+import subprocess
 import time
 import os
 import logging
@@ -96,6 +97,25 @@ def init_trade_csv():
 def append_trade_csv(record: dict):
     with open(TRADE_CSV, 'a', newline='', encoding='utf-8-sig') as f:
         csv.DictWriter(f, fieldnames=TRADE_HEADERS).writerow(record)
+    threading.Thread(target=_git_push_csv, daemon=True).start()
+
+def _git_push_csv():
+    try:
+        repo = Path(__file__).parent
+        ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
+        subprocess.run(["git", "-C", str(repo), "add", "logs/trade_records.csv"],
+                       check=True, capture_output=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", f"trade: {ts}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+            logger.info("[Git] CSV pushed to GitHub")
+        else:
+            logger.info("[Git] 無變更，略過 push")
+    except Exception as e:
+        logger.warning(f"[Git] push 失敗: {e}")
 
 init_trade_csv()
 
