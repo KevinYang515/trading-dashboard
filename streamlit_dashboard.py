@@ -10,6 +10,7 @@ st.set_page_config(page_title="TMF 交易紀錄", page_icon="📈", layout="wide
 TZ_TW = timezone(timedelta(hours=8))
 API_URL = "https://api.github.com/repos/KevinYang515/trading-dashboard/contents/logs/trade_records.csv"
 TMF_POINT_VALUE = 10
+COMMISSION_PER_LOT = 40  # NT$24 手續費 + NT$16 期貨交易稅，per round-trip（永豐實際對帳單）
 
 @st.cache_data(ttl=60)
 def load_data():
@@ -50,6 +51,7 @@ def calc_pnl(trades):
             if position < 0:
                 close_qty = min(qty, abs(position))
                 realized += (avg_cost - price) * close_qty * TMF_POINT_VALUE
+                realized -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position += close_qty
             if qty > 0:
@@ -59,6 +61,7 @@ def calc_pnl(trades):
             if position > 0:
                 close_qty = min(qty, position)
                 realized += (price - avg_cost) * close_qty * TMF_POINT_VALUE
+                realized -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position -= close_qty
             if qty > 0:
@@ -168,6 +171,7 @@ if not all_filled.empty and all_filled['fill_price'].notna().any():
             if position < 0:
                 close_qty = min(qty, abs(position))
                 trade_pnl = (avg_cost - price) * close_qty * TMF_POINT_VALUE
+                trade_pnl -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position += close_qty
             if qty > 0:
@@ -178,6 +182,7 @@ if not all_filled.empty and all_filled['fill_price'].notna().any():
             if position > 0:
                 close_qty = min(qty, position)
                 trade_pnl = (price - avg_cost) * close_qty * TMF_POINT_VALUE
+                trade_pnl -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position -= close_qty
             if qty > 0:
