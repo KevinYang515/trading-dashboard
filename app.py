@@ -88,6 +88,80 @@ TRADE_HEADERS = [
     "pos_before", "target_pos", "order_status", "note"
 ]
 
+BALANCE_CSV = "logs/balance_log.csv"
+BALANCE_HEADERS = [
+    "datetime", "session",
+    "yesterday_balance", "today_balance", "equity",
+    "future_settle_profitloss", "future_open_position", "available_margin"
+]
+
+def init_balance_csv():
+    path = Path(BALANCE_CSV)
+    if not path.exists():
+        with open(BALANCE_CSV, 'w', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=BALANCE_HEADERS).writeheader()
+
+def log_balance_snapshot(session: str):
+    try:
+        m = api.margin(api.futopt_account, timeout=5000)
+        record = {
+            "datetime":                 datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S"),
+            "session":                  session,
+            "yesterday_balance":        m.yesterday_balance,
+            "today_balance":            m.today_balance,
+            "equity":                   m.equity,
+            "future_settle_profitloss": m.future_settle_profitloss,
+            "future_open_position":     m.future_open_position,
+            "available_margin":         m.available_margin,
+        }
+        with open(BALANCE_CSV, 'a', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=BALANCE_HEADERS).writerow(record)
+        threading.Thread(target=_git_push_balance, daemon=True).start()
+        logger.info(f"[Balance] {session} 快照已記錄：equity={m.equity}")
+    except Exception as e:
+        logger.warning(f"[Balance] 快照失敗: {e}")
+
+def _git_push_balance():
+    repo = Path(__file__).parent
+    ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        subprocess.run(["git", "-C", str(repo), "add", "logs/balance_log.csv"],
+                       check=True, capture_output=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", f"balance: {ts}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return
+    except Exception as e:
+        logger.warning(f"[Git] balance commit 失敗: {e}")
+        return
+    for attempt in range(1, 4):
+        try:
+            subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+            logger.info("[Git] balance_log pushed")
+            return
+        except Exception as e:
+            logger.warning(f"[Git] balance push 失敗 (attempt {attempt}/3): {e}")
+            if attempt < 3:
+                time.sleep(5)
+
+def balance_logger_thread():
+    # 日盤收 13:45 → 13:46；夜盤收 05:00 → 05:01
+    TRIGGERS = {(13, 46): "日盤", (5, 1): "夜盤"}
+    logged = set()
+    while True:
+        time.sleep(30)
+        now = datetime.now(TZ_TW)
+        key = (now.date(), now.hour, now.minute)
+        hm = (now.hour, now.minute)
+        if hm in TRIGGERS and key not in logged:
+            logged.add(key)
+            log_balance_snapshot(TRIGGERS[hm])
+        if len(logged) > 20:
+            logged = set(list(logged)[-10:])
+
+
 def init_trade_csv():
     path = Path(TRADE_CSV)
     if not path.exists():
@@ -100,24 +174,52 @@ def append_trade_csv(record: dict):
     threading.Thread(target=_git_push_csv, daemon=True).start()
 
 def _git_push_csv():
+    repo = Path(__file__).parent
+    ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        repo = Path(__file__).parent
-        ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
         subprocess.run(["git", "-C", str(repo), "add", "logs/trade_records.csv"],
                        check=True, capture_output=True)
         result = subprocess.run(
             ["git", "-C", str(repo), "commit", "-m", f"trade: {ts}"],
             capture_output=True, text=True
         )
-        if result.returncode == 0:
+        if result.returncode != 0:
+            logger.info("[Git] 無變更，略過 push")
+            return
+    except Exception as e:
+        logger.warning(f"[Git] commit 失敗: {e}")
+        return
+
+    # push with retry
+    for attempt in range(1, 4):
+        try:
             subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
             logger.info("[Git] CSV pushed to GitHub")
+            return
+        except Exception as e:
+            logger.warning(f"[Git] push 失敗 (attempt {attempt}/3): {e}")
+            if attempt < 3:
+                time.sleep(5)
+
+def _push_pending_commits():
+    """啟動時補推上次重啟前未 push 的 commit"""
+    try:
+        repo = Path(__file__).parent
+        result = subprocess.run(
+            ["git", "-C", str(repo), "push"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            logger.info("[Git] 啟動補推完成")
         else:
-            logger.info("[Git] 無變更，略過 push")
+            logger.info("[Git] 啟動補推：無待推 commit 或失敗")
     except Exception as e:
-        logger.warning(f"[Git] push 失敗: {e}")
+        logger.warning(f"[Git] 啟動補推失敗: {e}")
 
 init_trade_csv()
+threading.Thread(target=_push_pending_commits, daemon=True).start()
+init_balance_csv()
+threading.Thread(target=balance_logger_thread, daemon=True).start()
 
 # ==========================================
 # 3. 智慧換月邏輯
@@ -176,6 +278,44 @@ def perform_login():
         return False
 
 perform_login()
+
+def _check_position_on_startup():
+    """啟動時比對 CSV 預期部位 vs 永豐實際部位，不一致時發 Line 通知"""
+    try:
+        # 讀 CSV 最後一筆的 target_pos 當作「預期部位」
+        expected_pos = 0
+        path = Path(TRADE_CSV)
+        if path.exists():
+            with open(TRADE_CSV, 'r', encoding='utf-8-sig') as f:
+                rows = list(csv.DictReader(f))
+            if rows:
+                try:
+                    expected_pos = int(float(rows[-1]['target_pos']))
+                except (ValueError, KeyError):
+                    expected_pos = 0
+
+        # 查永豐實際部位
+        actual_pos = get_total_position()
+        logger.info(f"[Startup] CSV預期={expected_pos}, 永豐實際={actual_pos}")
+
+        if actual_pos != expected_pos:
+            diff = actual_pos - expected_pos
+            msg = (
+                f"\n⚠️ 啟動部位不一致！"
+                f"\nCSV 預期：{expected_pos:+d} 口"
+                f"\n永豐實際：{actual_pos:+d} 口"
+                f"\n差異：{diff:+d} 口"
+                f"\n請確認後手動處理"
+            )
+            logger.warning(f"[Startup] 部位不一致！預期={expected_pos}, 實際={actual_pos}")
+            send_line_notify(msg)
+        else:
+            logger.info(f"[Startup] 部位一致：{actual_pos} 口 ✓")
+
+    except Exception as e:
+        logger.warning(f"[Startup] 部位比對失敗: {e}")
+
+threading.Thread(target=_check_position_on_startup, daemon=True).start()
 
 def check_token_and_relogin():
     try:

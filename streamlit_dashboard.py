@@ -8,9 +8,29 @@ from datetime import datetime, timedelta, timezone
 st.set_page_config(page_title="TMF 交易紀錄", page_icon="📈", layout="wide")
 
 TZ_TW = timezone(timedelta(hours=8))
-API_URL = "https://api.github.com/repos/KevinYang515/trading-dashboard/contents/logs/trade_records.csv"
+API_URL         = "https://api.github.com/repos/KevinYang515/trading-dashboard/contents/logs/trade_records.csv"
+BALANCE_API_URL = "https://api.github.com/repos/KevinYang515/trading-dashboard/contents/logs/balance_log.csv"
 TMF_POINT_VALUE = 10
-COMMISSION_PER_LOT = 40  # NT$24 手續費 + NT$16 期貨交易稅，per round-trip（永豐實際對帳單）
+
+@st.cache_data(ttl=60)
+def load_balance_data():
+    try:
+        resp = requests.get(BALANCE_API_URL, timeout=10)
+        if resp.status_code == 404:
+            return pd.DataFrame()
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()['content']).decode('utf-8-sig')
+        df = pd.read_csv(io.StringIO(content))
+        if df.empty:
+            return df
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df['date'] = df['datetime'].dt.date
+        for col in ['yesterday_balance', 'today_balance', 'equity',
+                    'future_settle_profitloss', 'future_open_position', 'available_margin']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def load_data():
@@ -51,7 +71,6 @@ def calc_pnl(trades):
             if position < 0:
                 close_qty = min(qty, abs(position))
                 realized += (avg_cost - price) * close_qty * TMF_POINT_VALUE
-                realized -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position += close_qty
             if qty > 0:
@@ -61,7 +80,6 @@ def calc_pnl(trades):
             if position > 0:
                 close_qty = min(qty, position)
                 realized += (price - avg_cost) * close_qty * TMF_POINT_VALUE
-                realized -= close_qty * COMMISSION_PER_LOT
                 qty -= close_qty
                 position -= close_qty
             if qty > 0:
@@ -145,67 +163,44 @@ else:
     st.dataframe(display.style.apply(color_row, axis=1),
                  use_container_width=True, hide_index=True)
 
-# 歷史每日損益長條圖
+# 歷史帳戶餘額折線圖
 st.divider()
-st.subheader("歷史每日損益（元）")
+st.subheader("歷史帳戶餘額（元）")
 
-all_filled = df[df['order_status'].str.contains('Filled', na=False)].copy().sort_values('datetime')
+bal_df = load_balance_data()
 
-if not all_filled.empty and all_filled['fill_price'].notna().any():
-    # 從第一筆的 pos_before 初始化，避免跨 session 的平倉被誤算
-    first = all_filled.iloc[0]
-    position = int(first['pos_before']) if pd.notna(first['pos_before']) else 0
-    avg_cost = float(first['signal_price']) if position != 0 and pd.notna(first['signal_price']) else 0.0
-    daily_pnl = {}
+if not bal_df.empty:
+    # 每天取最後一筆（日盤或夜盤皆可）
+    daily_bal = (
+        bal_df.sort_values('datetime')
+              .groupby('date')
+              .last()
+              .reset_index()
+    )
+    daily_bal['date'] = daily_bal['date'].astype(str)
+    daily_bal = daily_bal.set_index('date')
 
-    for _, row in all_filled.iterrows():
-        if pd.isna(row['fill_price']):
-            continue
-        price = float(row['fill_price'])
-        qty = int(row['quantity'])
-        action = row['action']
-        trade_date = str(row['date'])
-        trade_pnl = 0.0
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("最新權益數", f"{int(daily_bal['equity'].iloc[-1]):,} 元")
+    with col_b:
+        st.metric("可動用保證金", f"{int(daily_bal['available_margin'].iloc[-1]):,} 元")
 
-        if action == 'BUY':
-            if position < 0:
-                close_qty = min(qty, abs(position))
-                trade_pnl = (avg_cost - price) * close_qty * TMF_POINT_VALUE
-                trade_pnl -= close_qty * COMMISSION_PER_LOT
-                qty -= close_qty
-                position += close_qty
-            if qty > 0:
-                total = abs(position) + qty
-                avg_cost = (avg_cost * abs(position) + price * qty) / total if total > 0 else price
-                position += qty
-        else:
-            if position > 0:
-                close_qty = min(qty, position)
-                trade_pnl = (price - avg_cost) * close_qty * TMF_POINT_VALUE
-                trade_pnl -= close_qty * COMMISSION_PER_LOT
-                qty -= close_qty
-                position -= close_qty
-            if qty > 0:
-                total = abs(position) + qty
-                avg_cost = (avg_cost * abs(position) + price * qty) / total if total > 0 else price
-                position -= qty
+    st.line_chart(daily_bal[['equity']], height=220)
 
-        daily_pnl[trade_date] = daily_pnl.get(trade_date, 0.0) + trade_pnl
-
-    if daily_pnl:
-        dates = sorted(daily_pnl.keys())
-        cum, cum_rows = 0.0, []
-        for d in dates:
-            cum += daily_pnl[d]
-            cum_rows.append({'日期': d, '當日損益': int(daily_pnl[d]), '累積損益': int(cum)})
-
-        pnl_df = pd.DataFrame(cum_rows).set_index('日期')
-        st.bar_chart(pnl_df[['當日損益']])
-        st.caption("累積損益")
-        st.line_chart(pnl_df[['累積損益']])
-    else:
-        st.info("尚無已實現損益資料")
+    st.caption("每日帳戶明細")
+    show_cols = ['equity', 'today_balance', 'future_settle_profitloss',
+                 'future_open_position', 'available_margin', 'session']
+    st.dataframe(
+        daily_bal[show_cols].rename(columns={
+            'equity': '權益數', 'today_balance': '本日餘額',
+            'future_settle_profitloss': '期貨平倉損益',
+            'future_open_position': '浮動損益',
+            'available_margin': '可動用保證金', 'session': '時段'
+        }),
+        use_container_width=True
+    )
 else:
-    st.info("尚無已實現損益資料")
+    st.info("尚無帳戶餘額資料（每日 13:46 及 05:01 自動記錄）")
 
 st.caption("資料每次成交後自動更新 · 快取 60 秒")
