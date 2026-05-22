@@ -667,6 +667,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
+@app.route('/api/balance/snapshot', methods=['POST'])
+def api_balance_snapshot():
+    if WEBHOOK_SECRET and request.args.get('token', '') != WEBHOOK_SECRET:
+        return jsonify({'status': 'error', 'msg': 'Unauthorized'}), 401
+    import threading
+    threading.Thread(target=log_balance_snapshot, args=('手動',), daemon=True).start()
+    return jsonify({'status': 'ok', 'msg': 'snapshot triggered'})
+
 @app.route('/dashboard')
 def dashboard():
     if WEBHOOK_SECRET and request.args.get("token", "") != WEBHOOK_SECRET:
