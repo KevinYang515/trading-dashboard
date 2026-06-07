@@ -412,8 +412,8 @@ with tab_crash:
             return ""
 
         styled = display_stats.style \
-            .applymap(color_prob, subset=["上漲機率"]) \
-            .applymap(color_return, subset=["平均報酬", "中位數", "最差", "最佳"])
+            .map(color_prob, subset=["上漲機率"]) \
+            .map(color_return, subset=["平均報酬", "中位數", "最差", "最佳"])
 
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -469,7 +469,7 @@ with tab_crash:
                 pass
             return ""
 
-        events_styled = events_df.style.applymap(color_fwd, subset=fwd_cols)
+        events_styled = events_df.style.map(color_fwd, subset=fwd_cols)
         st.dataframe(events_styled, use_container_width=True, hide_index=True, height=500)
 
         # ── 關鍵結論 ──────────────────────────────────
