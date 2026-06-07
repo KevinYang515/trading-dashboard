@@ -425,22 +425,32 @@ with tab_crash:
             chart_df = chart_df.set_index("期間")
             st.bar_chart(chart_df, height=280)
 
-        # ── 分佈：+1d / +5d / +21d ────────────────────
-        st.markdown("### 報酬分佈（+1d / +5d / +21d）")
-        dist_cols = st.columns(3)
-        for i, h in enumerate([1, 5, 21]):
+        # ── 分佈：全部 6 個期間 ────────────────────────
+        st.markdown("### 報酬分佈（各持有期間）")
+        row1_cols = st.columns(3)
+        row2_cols = st.columns(3)
+        dist_grid = row1_cols + row2_cols
+        for i, h in enumerate(HORIZONS):
             col_name = f"+{h}d(%)"
             if col_name not in events_df.columns:
                 continue
             vals = events_df[col_name].dropna()
             if vals.empty:
                 continue
-            bins = pd.cut(vals, bins=10)
+            bins = pd.cut(vals, bins=12)
             hist = vals.groupby(bins, observed=True).count()
             hist.index = [f"{b.left:.1f}~{b.right:.1f}" for b in hist.index]
-            with dist_cols[i]:
-                st.markdown(f"**+{h} 交易日**")
-                st.bar_chart(hist, height=200)
+            win_rate = (vals > 0).mean() * 100
+            mean_val = vals.mean()
+            with dist_grid[i]:
+                st.markdown(
+                    f"**+{h} 交易日**　"
+                    f"<span style='color:{'#4caf50' if win_rate>=50 else '#f44336'}'>"
+                    f"上漲 {win_rate:.0f}%</span>　"
+                    f"均值 {mean_val:+.1f}%",
+                    unsafe_allow_html=True,
+                )
+                st.bar_chart(hist, height=180)
 
         # ── 完整歷史事件表 ────────────────────────────
         st.markdown("### 完整歷史事件紀錄")
