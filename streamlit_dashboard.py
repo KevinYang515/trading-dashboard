@@ -13,6 +13,8 @@ API_URL         = f"https://api.github.com/repos/{REPO}/contents/logs/trade_reco
 BALANCE_API_URL = f"https://api.github.com/repos/{REPO}/contents/logs/balance_log.csv"
 BT_A_URL        = f"https://api.github.com/repos/{REPO}/contents/backtest/results_breakout.csv"
 BT_B_URL        = f"https://api.github.com/repos/{REPO}/contents/backtest/results_scalp.csv"
+PAPER_LOG_URL   = f"https://api.github.com/repos/{REPO}/contents/logs/paper_trade_log.csv"
+SIGNALS_DIR_URL = f"https://api.github.com/repos/{REPO}/contents/daily_signals"
 TMF_POINT_VALUE = 10
 HORIZONS        = [1, 3, 5, 7, 10, 21]
 
@@ -176,7 +178,8 @@ def calc_pnl(trades):
 
 # ── 頁面架構 ────────────────────────────────────────────
 st.title("📈 TMF 交易系統")
-tab_trade, tab_bt, tab_crash = st.tabs(["交易紀錄", "回測結果", "極端行情研究"])
+tab_trade, tab_bt, tab_crash, tab_strat_d = st.tabs(
+    ["交易紀錄", "回測結果", "極端行情研究", "Strategy D（出處置）"])
 
 
 # ══════════════════════════════════════════════════════
@@ -505,3 +508,141 @@ with tab_crash:
                 "歷史顯示多數案例出現明顯反彈。現貨部位是否調節，"
                 "可參考隔日成交量與是否出現止跌訊號，而非單純依據跌幅。"
             )
+
+
+# ══════════════════════════════════════════════════════
+# Tab 4：Strategy D（出處置動能跟進）
+# ══════════════════════════════════════════════════════
+@st.cache_data(ttl=120)
+def load_paper_log():
+    try:
+        resp = requests.get(PAPER_LOG_URL, timeout=10)
+        if resp.status_code == 404:
+            return pd.DataFrame()
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
+        df = pd.read_csv(io.StringIO(content), comment='#')
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=120)
+def list_daily_signals():
+    """回傳 daily_signals/ 內的所有 csv 檔名 list（new -> old）"""
+    try:
+        resp = requests.get(SIGNALS_DIR_URL, timeout=10)
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        items = resp.json()
+        names = [it["name"] for it in items if it["name"].endswith(".csv")]
+        return sorted(names, reverse=True)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=120)
+def load_signal_csv(filename):
+    url = f"https://api.github.com/repos/{REPO}/contents/daily_signals/{filename}"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
+        return pd.read_csv(io.StringIO(content))
+    except Exception:
+        return pd.DataFrame()
+
+
+with tab_strat_d:
+    st.markdown("""
+**策略**：漲多 20 分鐘處置結束後 1-14 天 + 大/中型市值 + 股價 ≥ 300 + 前一日漲幅 ≥ 9% + 量比 ≥ 1
+
+**兩個 track（全部模擬，未上線）**：
+- **D-Cash**：現股 09:00 集合競價買入，TP +10t / trail -2t
+- **D-SSF**：個股期貨 08:45 開盤買入（paper trade 階段，無歷史 intraday 資料）
+
+📖 完整 playbook：[STRATEGY_D_PLAYBOOK.md](https://github.com/KevinYang515/tmf-bot/blob/main/STRATEGY_D_PLAYBOOK.md)
+""")
+
+    # ── 最新訊號 ────────────────────────────────────────
+    st.subheader("🔔 最新訊號")
+    signal_files = list_daily_signals()
+    if signal_files:
+        sel_sig = st.selectbox("選擇訊號日期", options=signal_files, index=0,
+                                format_func=lambda f: f.replace(".csv", ""))
+        sig = load_signal_csv(sel_sig)
+        if not sig.empty:
+            cols_show = ['code', 'name', 'cap_label', 'prev_close', 'ret_prev_%',
+                         'vol_ratio', 'days_post_disp', 'whale_chg_%', 'has_ssf',
+                         'ssf_root', 'limit_up']
+            existing = [c for c in cols_show if c in sig.columns]
+            st.dataframe(sig[existing], use_container_width=True, hide_index=True)
+
+            ssf_n = int(sig['has_ssf'].sum()) if 'has_ssf' in sig.columns else 0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("D-Cash 候選", f"{len(sig)} 筆")
+            c2.metric("D-SSF 子集", f"{ssf_n} 筆")
+            c3.metric("無 SSF", f"{len(sig) - ssf_n} 筆")
+        else:
+            st.info(f"{sel_sig} 無候選訊號")
+    else:
+        st.info("尚無 daily_signals 資料")
+
+    st.divider()
+
+    # ── Paper Trade 紀錄 ────────────────────────────────
+    st.subheader("📊 Paper Trade 紀錄")
+    log = load_paper_log()
+
+    if log.empty or 'date' not in log.columns or log['date'].isna().all():
+        st.info("尚無 paper trade 紀錄。請手動填寫 `logs/paper_trade_log.csv` 後 git push 更新。")
+    else:
+        log = log.dropna(subset=['date'])
+        log['date'] = pd.to_datetime(log['date'], errors='coerce')
+        log = log.dropna(subset=['date'])
+        for c in ['actual_pnl_per_share', 'actual_pnl_pct', 'slippage_ticks',
+                  'signal_ret_prev', 'signal_days_post_disp']:
+            if c in log.columns:
+                log[c] = pd.to_numeric(log[c], errors='coerce')
+
+        tracks = log['track'].dropna().unique().tolist()
+        sel = st.multiselect("Track 篩選", options=tracks, default=tracks, key="strat_d_track_filter")
+        view = log[log['track'].isin(sel)]
+
+        if not view.empty:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("總筆數", f"{len(view)}")
+            pnl = view['actual_pnl_per_share'].dropna() if 'actual_pnl_per_share' in view.columns else pd.Series()
+            if not pnl.empty:
+                c2.metric("總 PnL/股", f"{pnl.sum():+.2f}")
+                c3.metric("平均 PnL/股", f"{pnl.mean():+.3f}")
+                c4.metric("WR", f"{(pnl > 0).mean() * 100:.1f}%")
+
+            st.markdown("**By Track:**")
+            if 'actual_pnl_per_share' in view.columns:
+                agg = view.groupby('track').agg(
+                    n=('actual_pnl_per_share', 'count'),
+                    wr_pct=('actual_pnl_per_share', lambda x: (x > 0).mean() * 100),
+                    total=('actual_pnl_per_share', 'sum'),
+                    avg=('actual_pnl_per_share', 'mean'),
+                ).round(2)
+                st.dataframe(agg, use_container_width=True)
+
+            st.markdown("**明細：**")
+            st.dataframe(view.sort_values('date', ascending=False),
+                         use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── 操作說明 ────────────────────────────────────────
+    with st.expander("📖 如何記錄 paper trade"):
+        st.markdown("""
+1. **每天 17:30 後**（本機）：執行 `python backtest/daily_signal.py`，產生明日候選清單
+2. **隔天 08:30-09:00 之間**（紙上模擬）：
+   - **D-Cash**: 紙上模擬「掛漲停價限價買」
+   - **D-SSF**: 紙上模擬「8:45 期貨開盤市價買」
+3. **09:00 後**：紀錄實際開盤成交價（cash 看現股、SSF 看期貨）
+4. **13:00 前**：觀察 TP / trail / CLOSE 出場結果
+5. **填寫 `logs/paper_trade_log.csv`** → git push → 此頁自動更新（快取 2 分鐘）
+""")

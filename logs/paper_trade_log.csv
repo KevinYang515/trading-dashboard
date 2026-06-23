@@ -1,0 +1,16 @@
+date,track,code,name,signal_ret_prev,signal_days_post_disp,planned_entry,planned_tp,planned_stop,actual_entry,actual_exit,exit_reason,actual_pnl_per_share,actual_pnl_pct,fill_rate_ok,slippage_ticks,notes
+# date: 進場日 YYYY-MM-DD
+# track: D-Cash | D-SSF
+# code: 股票代號
+# signal_ret_prev: 前一日漲幅 %（從 daily_signal.py）
+# signal_days_post_disp: 距處置結束日數
+# planned_entry: D-Cash = 漲停價委託（cross 成交在開盤）; D-SSF = 8:45 期貨開盤
+# planned_tp: planned_entry + 10*tick
+# planned_stop: planned_entry - 2*tick
+# actual_entry: 實際成交價
+# actual_exit: 實際出場價
+# exit_reason: TP | TRAIL | CLOSE_1300
+# actual_pnl_per_share: actual_exit - actual_entry - cost
+# fill_rate_ok: yes (cash 集合競價有 cross) | no (買不到，跳過)
+# slippage_ticks: 實際 - planned 進場價的 tick 數
+# notes: 其他觀察（漲停鎖死/盤中卡關/特殊新聞等）
