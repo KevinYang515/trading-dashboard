@@ -82,6 +82,44 @@ def load_backtest_b():
     return _gh_csv(BT_B_URL)
 
 
+@st.cache_data(ttl=120)
+def load_paper_log():
+    try:
+        resp = requests.get(PAPER_LOG_URL, timeout=10)
+        if resp.status_code == 404:
+            return pd.DataFrame()
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
+        return pd.read_csv(io.StringIO(content), comment='#')
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=120)
+def list_daily_signals():
+    try:
+        resp = requests.get(SIGNALS_DIR_URL, timeout=10)
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        return sorted([it["name"] for it in resp.json() if it["name"].endswith(".csv")],
+                      reverse=True)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=120)
+def load_signal_csv(filename):
+    url = f"https://api.github.com/repos/{REPO}/contents/daily_signals/{filename}"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
+        return pd.read_csv(io.StringIO(content))
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=3600)
 def load_crash_study(threshold: float = -0.05):
     try:
@@ -178,14 +216,25 @@ def calc_pnl(trades):
 
 # ── 頁面架構 ────────────────────────────────────────────
 st.title("📈 TMF 交易系統")
-tab_trade, tab_bt, tab_crash, tab_strat_d = st.tabs(
-    ["交易紀錄", "回測結果", "極端行情研究", "Strategy D（出處置）"])
+
+PAGES = [
+    "📊 TMF 交易紀錄",
+    "📈 回測結果",
+    "⚠️ 極端行情研究",
+    "🎯 Strategy D（出處置）",
+]
+with st.sidebar:
+    st.markdown("### 選單")
+    page = st.radio("page_nav", options=PAGES, label_visibility="collapsed")
+    st.divider()
+    st.caption("**TMF**：微型台指期貨自動交易")
+    st.caption("**Strategy D**：出處置股動能跟進（模擬中）")
 
 
 # ══════════════════════════════════════════════════════
-# Tab 1：交易紀錄
+# Page 1：TMF 交易紀錄
 # ══════════════════════════════════════════════════════
-with tab_trade:
+if page == "📊 TMF 交易紀錄":
     df = load_trade_data()
 
     if df.empty:
@@ -270,9 +319,9 @@ with tab_trade:
 
 
 # ══════════════════════════════════════════════════════
-# Tab 2：回測結果
+# Page 2：回測結果
 # ══════════════════════════════════════════════════════
-with tab_bt:
+elif page == "📈 回測結果":
     st.subheader("回測資料：MXF 1分K，74 個交易日（2026-02-23 ~ 2026-05-23）")
     st.caption("手續費已含：NT$40 round-trip（4點）")
 
@@ -356,9 +405,9 @@ with tab_bt:
 
 
 # ══════════════════════════════════════════════════════
-# Tab 3：極端行情研究
+# Page 3：極端行情研究
 # ══════════════════════════════════════════════════════
-with tab_crash:
+elif page == "⚠️ 極端行情研究":
     st.subheader("極端行情研究：台灣加權指數單日大跌後走勢")
     st.caption("資料來源：Yahoo Finance ^TWII（2000 年至今）· 快取 1 小時")
 
@@ -511,92 +560,110 @@ with tab_crash:
 
 
 # ══════════════════════════════════════════════════════
-# Tab 4：Strategy D（出處置動能跟進）
+# Page 4：Strategy D（出處置動能跟進）
 # ══════════════════════════════════════════════════════
-@st.cache_data(ttl=120)
-def load_paper_log():
-    try:
-        resp = requests.get(PAPER_LOG_URL, timeout=10)
-        if resp.status_code == 404:
-            return pd.DataFrame()
-        resp.raise_for_status()
-        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
-        df = pd.read_csv(io.StringIO(content), comment='#')
-        return df
-    except Exception:
-        return pd.DataFrame()
+elif page == "🎯 Strategy D（出處置）":
+    st.header("🎯 Strategy D — 出處置動能跟進")
+    st.caption("⚠️ 目前全部紙上模擬，未實單。回測 3.5 年 135 筆，Sharpe 8.89。")
 
+    # ── 一句話策略說明 ─────────────────────────────────
+    with st.container(border=True):
+        st.markdown("""
+**做什麼？** 找昨天接近漲停（≥9%）的中大型股，**如果它最近剛結束處置**（在處置結束後 1-14 天內），今天開盤買進。
 
-@st.cache_data(ttl=120)
-def list_daily_signals():
-    """回傳 daily_signals/ 內的所有 csv 檔名 list（new -> old）"""
-    try:
-        resp = requests.get(SIGNALS_DIR_URL, timeout=10)
-        if resp.status_code == 404:
-            return []
-        resp.raise_for_status()
-        items = resp.json()
-        names = [it["name"] for it in items if it["name"].endswith(".csv")]
-        return sorted(names, reverse=True)
-    except Exception:
-        return []
-
-
-@st.cache_data(ttl=120)
-def load_signal_csv(filename):
-    url = f"https://api.github.com/repos/{REPO}/contents/daily_signals/{filename}"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        content = base64.b64decode(resp.json()["content"]).decode("utf-8-sig")
-        return pd.read_csv(io.StringIO(content))
-    except Exception:
-        return pd.DataFrame()
-
-
-with tab_strat_d:
-    st.markdown("""
-**策略**：漲多 20 分鐘處置結束後 1-14 天 + 大/中型市值 + 股價 ≥ 300 + 前一日漲幅 ≥ 9% + 量比 ≥ 1
-
-**兩個 track（全部模擬，未上線）**：
-- **D-Cash**：現股 09:00 集合競價買入，TP +10t / trail -2t
-- **D-SSF**：個股期貨 08:45 開盤買入（paper trade 階段，無歷史 intraday 資料）
-
-📖 完整 playbook：[STRATEGY_D_PLAYBOOK.md](https://github.com/KevinYang515/tmf-bot/blob/main/STRATEGY_D_PLAYBOOK.md)
+**怎麼出場？** TP +10 tick 達標賣 / 跌 2 tick 移動停損 / 13:00 強制平倉。
 """)
 
-    # ── 最新訊號 ────────────────────────────────────────
-    st.subheader("🔔 最新訊號")
-    signal_files = list_daily_signals()
-    if signal_files:
-        sel_sig = st.selectbox("選擇訊號日期", options=signal_files, index=0,
-                                format_func=lambda f: f.replace(".csv", ""))
-        sig = load_signal_csv(sel_sig)
-        if not sig.empty:
-            cols_show = ['code', 'name', 'cap_label', 'prev_close', 'ret_prev_%',
-                         'vol_ratio', 'days_post_disp', 'whale_chg_%', 'has_ssf',
-                         'ssf_root', 'limit_up']
-            existing = [c for c in cols_show if c in sig.columns]
-            st.dataframe(sig[existing], use_container_width=True, hide_index=True)
+    # ── 兩個 track 卡片 ────────────────────────────────
+    col_a, col_b = st.columns(2)
+    with col_a:
+        with st.container(border=True):
+            st.markdown("#### 💰 D-Cash（現股）")
+            st.markdown("""
+- 09:00 集合競價買入（掛漲停限價）
+- ✅ 已完整回測，Sharpe 8.89
+- 📍 **目前模擬中，準備上線**
+""")
+    with col_b:
+        with st.container(border=True):
+            st.markdown("#### ⚡ D-SSF（個股期貨）")
+            st.markdown("""
+- 08:45 期貨開盤買入
+- ⏳ 沒歷史分鐘資料、無法精確回測
+- 📍 **紙上模擬累積樣本中**
+""")
 
-            ssf_n = int(sig['has_ssf'].sum()) if 'has_ssf' in sig.columns else 0
-            c1, c2, c3 = st.columns(3)
-            c1.metric("D-Cash 候選", f"{len(sig)} 筆")
-            c2.metric("D-SSF 子集", f"{ssf_n} 筆")
-            c3.metric("無 SSF", f"{len(sig) - ssf_n} 筆")
-        else:
-            st.info(f"{sel_sig} 無候選訊號")
-    else:
-        st.info("尚無 daily_signals 資料")
+    st.markdown(
+        "📖 完整策略邏輯：[STRATEGY_D_PLAYBOOK.md]"
+        "(https://github.com/KevinYang515/tmf-bot/blob/main/STRATEGY_D_PLAYBOOK.md)"
+    )
 
     st.divider()
 
-    # ── Paper Trade 紀錄 ────────────────────────────────
-    st.subheader("📊 Paper Trade 紀錄")
+    # ── 最新候選訊號 ───────────────────────────────────
+    st.subheader("🔔 最新進場候選")
+    signal_files = list_daily_signals()
+    if not signal_files:
+        st.info("尚無候選清單。本機跑 `python backtest/daily_signal.py` 產生後 git push。")
+    else:
+        sel_sig = st.selectbox("選擇日期", options=signal_files, index=0,
+                               format_func=lambda f: f.replace(".csv", "") + " 進場")
+        sig = load_signal_csv(sel_sig)
+        if sig.empty:
+            st.info(f"{sel_sig} 無候選")
+        else:
+            ssf_n = int(sig['has_ssf'].sum()) if 'has_ssf' in sig.columns else 0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("總候選", f"{len(sig)} 檔")
+            c2.metric("有個股期貨", f"{ssf_n} 檔")
+            c3.metric("只能做現股", f"{len(sig) - ssf_n} 檔")
+
+            # 友善欄位 + 重排
+            view = sig.copy()
+            for c in ['prev_close', 'ret_prev_%', 'vol_ratio', 'days_post_disp',
+                      'whale_chg_%', 'limit_up']:
+                if c in view.columns:
+                    view[c] = pd.to_numeric(view[c], errors='coerce')
+
+            if 'has_ssf' in view.columns:
+                view['期貨'] = view['has_ssf'].map({True: '✓', False: '—'})
+            display_cols = []
+            rename_map = {
+                'code': '股號', 'name': '股名',
+                'cap_label': '規模', 'prev_close': '昨日收盤',
+                'ret_prev_%': '昨日漲幅(%)', 'vol_ratio': '量比',
+                'days_post_disp': '出處置 N 天', 'whale_chg_%': '大戶變化(%)',
+                'limit_up': '今日漲停價',
+            }
+            for c in rename_map:
+                if c in view.columns: display_cols.append(c)
+            display_cols.append('期貨')
+
+            view_show = view[display_cols].rename(columns=rename_map)
+            # 規模 friendly
+            if '規模' in view_show.columns:
+                view_show['規模'] = view_show['規模'].map({
+                    'A_大型': '大型 >500億', 'B_中型': '中型 100-500億'})
+
+            st.dataframe(view_show, use_container_width=True, hide_index=True,
+                         column_config={
+                             '昨日漲幅(%)': st.column_config.NumberColumn(format="%.1f%%"),
+                             '量比': st.column_config.NumberColumn(format="%.2fx"),
+                             '大戶變化(%)': st.column_config.NumberColumn(format="%+.2f"),
+                             '昨日收盤': st.column_config.NumberColumn(format="%.1f"),
+                             '今日漲停價': st.column_config.NumberColumn(format="%.1f"),
+                         })
+
+            st.caption("💡 下單流程：8:30-9:00 之間掛「限價買 @ 漲停價」進入集合競價，9:00 cross 成交在開盤價。")
+
+    st.divider()
+
+    # ── Paper Trade 紀錄 ──────────────────────────────
+    st.subheader("📊 模擬交易紀錄")
     log = load_paper_log()
 
     if log.empty or 'date' not in log.columns or log['date'].isna().all():
-        st.info("尚無 paper trade 紀錄。請手動填寫 `logs/paper_trade_log.csv` 後 git push 更新。")
+        st.info("⏳ 還沒有任何模擬交易紀錄。\n\n每天試一筆，慢慢累積樣本後就會看到統計數字。")
     else:
         log = log.dropna(subset=['date'])
         log['date'] = pd.to_datetime(log['date'], errors='coerce')
@@ -606,43 +673,55 @@ with tab_strat_d:
             if c in log.columns:
                 log[c] = pd.to_numeric(log[c], errors='coerce')
 
-        tracks = log['track'].dropna().unique().tolist()
-        sel = st.multiselect("Track 篩選", options=tracks, default=tracks, key="strat_d_track_filter")
-        view = log[log['track'].isin(sel)]
-
-        if not view.empty:
+        # 統計 metrics
+        pnl = log['actual_pnl_per_share'].dropna() if 'actual_pnl_per_share' in log.columns else pd.Series()
+        if not pnl.empty:
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("總筆數", f"{len(view)}")
-            pnl = view['actual_pnl_per_share'].dropna() if 'actual_pnl_per_share' in view.columns else pd.Series()
-            if not pnl.empty:
-                c2.metric("總 PnL/股", f"{pnl.sum():+.2f}")
-                c3.metric("平均 PnL/股", f"{pnl.mean():+.3f}")
-                c4.metric("WR", f"{(pnl > 0).mean() * 100:.1f}%")
+            c1.metric("總筆數", f"{len(log)}")
+            c2.metric("勝率", f"{(pnl > 0).mean() * 100:.0f}%")
+            c3.metric("平均賺/股", f"{pnl.mean():+.2f} 元")
+            c4.metric("累積總 P&L", f"{pnl.sum():+.0f} 元/股")
 
-            st.markdown("**By Track:**")
-            if 'actual_pnl_per_share' in view.columns:
-                agg = view.groupby('track').agg(
+            # By Track
+            if 'track' in log.columns:
+                st.markdown("**現股 vs 期貨 績效對比：**")
+                track_agg = log.dropna(subset=['actual_pnl_per_share']).groupby('track').agg(
                     n=('actual_pnl_per_share', 'count'),
-                    wr_pct=('actual_pnl_per_share', lambda x: (x > 0).mean() * 100),
-                    total=('actual_pnl_per_share', 'sum'),
-                    avg=('actual_pnl_per_share', 'mean'),
-                ).round(2)
-                st.dataframe(agg, use_container_width=True)
+                    勝率=('actual_pnl_per_share', lambda x: (x > 0).mean() * 100),
+                    累積=('actual_pnl_per_share', 'sum'),
+                    平均=('actual_pnl_per_share', 'mean'),
+                ).round(2).rename(columns={'n': '筆數'})
+                track_agg.index = track_agg.index.map(
+                    {'D-Cash': '💰 現股', 'D-SSF': '⚡ 期貨'}).fillna(track_agg.index)
+                st.dataframe(track_agg, use_container_width=True)
 
-            st.markdown("**明細：**")
-            st.dataframe(view.sort_values('date', ascending=False),
-                         use_container_width=True, hide_index=True)
+        # 明細
+        st.markdown("**所有紀錄：**")
+        show = log[['date', 'track', 'code', 'name', 'actual_entry',
+                    'actual_exit', 'exit_reason', 'actual_pnl_per_share']].copy() \
+                if 'actual_entry' in log.columns else log
+        if 'actual_entry' in log.columns:
+            show.columns = ['日期', '類型', '股號', '股名', '進場價', '出場價', '出場原因', '損益/股']
+        st.dataframe(show.sort_values(show.columns[0], ascending=False),
+                     use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # ── 操作說明 ────────────────────────────────────────
-    with st.expander("📖 如何記錄 paper trade"):
+    # ── 操作說明 ───────────────────────────────────────
+    with st.expander("📖 怎麼開始？（紙上模擬流程）"):
         st.markdown("""
-1. **每天 17:30 後**（本機）：執行 `python backtest/daily_signal.py`，產生明日候選清單
-2. **隔天 08:30-09:00 之間**（紙上模擬）：
-   - **D-Cash**: 紙上模擬「掛漲停價限價買」
-   - **D-SSF**: 紙上模擬「8:45 期貨開盤市價買」
-3. **09:00 後**：紀錄實際開盤成交價（cash 看現股、SSF 看期貨）
-4. **13:00 前**：觀察 TP / trail / CLOSE 出場結果
-5. **填寫 `logs/paper_trade_log.csv`** → git push → 此頁自動更新（快取 2 分鐘）
+1. **前一天傍晚**（17:30 後）
+   本機跑 `python backtest/daily_signal.py` → 自動產生明日候選 CSV
+   → `git push` 到網站
+
+2. **隔天早上 8:30-9:00**
+   看「最新進場候選」頁面，紙上模擬決定要做哪幾檔
+
+3. **9:00（現股）or 8:45（期貨）**
+   假裝進場，記錄實際開盤價
+
+4. **13:00 前**
+   觀察 TP / 停損 / 收盤平倉，記錄結果
+
+5. **手動填 `logs/paper_trade_log.csv`** → `git push` → 此頁自動更新
 """)
