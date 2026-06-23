@@ -632,7 +632,8 @@ elif page == "🎯 Strategy D（出處置）":
                 'code': '股號', 'name': '股名',
                 'cap_label': '規模', 'prev_close': '昨日收盤',
                 'ret_prev_%': '昨日漲幅(%)', 'vol_ratio': '量比',
-                'days_post_disp': '出處置 N 天', 'whale_chg_%': '大戶變化(%)',
+                'days_post_disp': '出處置 N 天', 'disp_type': '處置類型',
+                'whale_chg_%': '大戶變化(%)',
                 'limit_up': '今日漲停價',
             }
             for c in rename_map:

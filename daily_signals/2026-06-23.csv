@@ -1,3 +1,5 @@
-﻿code,name,cap_yi,cap_label,prev_close,ret_prev_%,vol_ratio,days_post_disp,whale_chg_%,has_ssf,ssf_root,limit_up
-7610,聯友金屬-創,1125.0,A_大型,2315.0,10.0,4.22,5,0.52,False,,2546.5
-3090,日電貿,956.0,A_大型,332.5,9.9,2.04,13,2.29,False,,365.75
+﻿code,name,cap_yi,cap_label,prev_close,ret_prev_%,vol_ratio,days_post_disp,disp_type,whale_chg_%,has_ssf,ssf_root,limit_up
+2472,立隆電,662.0,A_大型,402.0,10.0,1.9,15,5分鐘,-3.93,False,,442.2
+7610,聯友金屬-創,1125.0,A_大型,2315.0,10.0,4.22,5,20分鐘,0.52,False,,2546.5
+3090,日電貿,956.0,A_大型,332.5,9.9,2.04,13,20分鐘,2.29,False,,365.75
+2327,國巨*,22372.0,A_大型,1080.0,9.8,1.8,21,5分鐘,-1.11,True,QEF,1188.0
