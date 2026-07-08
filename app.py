@@ -68,8 +68,11 @@ CA_PASS        = os.environ.get("SJ_CA_PASS")
 PERSON_ID      = os.environ.get("SJ_PERSON_ID")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# TMF 每點價值 (小台 50 元/點)
-TMF_POINT_VALUE = 10
+# ==== 合約設定：TMF 微台 10元/點、MXF 小台 50元/點 ====
+CONTRACT_SYMBOL = os.environ.get("CONTRACT_SYMBOL", "MXF")
+POINT_VALUE = {"TMF": 10, "MXF": 50}[CONTRACT_SYMBOL]
+# 目標部位絕對值上限：TV 策略 pyramiding 最多 4，執行層 cap 到 3 (=回測 py3 配置)
+MAX_ABS_POS = int(os.environ.get("MAX_ABS_POS", "3"))
 
 api = sj.Shioaji(simulation=False)
 api_lock = threading.Lock()
@@ -88,6 +91,105 @@ TRADE_HEADERS = [
     "pos_before", "target_pos", "order_status", "note"
 ]
 
+# Webhook raw payload log — 抓 TV 真實送進來的完整資料用，用來 debug 漏單
+WEBHOOK_LOG_CSV = "logs/webhook_raw.csv"
+WEBHOOK_LOG_HEADERS = [
+    "received_at", "ticker", "target_pos", "signal_price",
+    "order_action", "order_comment", "order_contracts", "order_id",
+    "tv_timestamp", "decision", "raw_payload"
+]
+
+def init_trade_csv():
+    path = Path(TRADE_CSV)
+    if not path.exists():
+        with open(TRADE_CSV, 'w', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=TRADE_HEADERS).writeheader()
+
+def init_webhook_log():
+    path = Path(WEBHOOK_LOG_CSV)
+    if not path.exists():
+        with open(WEBHOOK_LOG_CSV, 'w', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=WEBHOOK_LOG_HEADERS).writeheader()
+
+_webhook_log_lock = threading.Lock()
+
+def log_webhook_raw(data: dict, decision: str):
+    """寫所有進來的 webhook (含被 dedup 殺掉的)"""
+    import json as _json
+    now_iso = datetime.now(TZ_TW).isoformat(timespec="seconds")
+    row = {
+        "received_at": now_iso,
+        "ticker": (data or {}).get("ticker", ""),
+        "target_pos": (data or {}).get("target_pos", ""),
+        "signal_price": (data or {}).get("signal_price", ""),
+        "order_action": (data or {}).get("order_action", ""),
+        "order_comment": (data or {}).get("order_comment", ""),
+        "order_contracts": (data or {}).get("order_contracts", ""),
+        "order_id": (data or {}).get("order_id", ""),
+        "tv_timestamp": (data or {}).get("timestamp", ""),
+        "decision": decision,
+        "raw_payload": _json.dumps(data or {}, ensure_ascii=False),
+    }
+    try:
+        with _webhook_log_lock:
+            with open(WEBHOOK_LOG_CSV, 'a', newline='', encoding='utf-8-sig') as f:
+                csv.DictWriter(f, fieldnames=WEBHOOK_LOG_HEADERS).writerow(row)
+    except Exception as e:
+        logger.error(f"[WebhookLog] write fail: {e}")
+
+def append_trade_csv(record: dict):
+    with open(TRADE_CSV, 'a', newline='', encoding='utf-8-sig') as f:
+        csv.DictWriter(f, fieldnames=TRADE_HEADERS).writerow(record)
+    threading.Thread(target=_git_push_csv, daemon=True).start()
+
+def _git_push_csv():
+    repo = Path(__file__).parent
+    ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        # 同時 add trade_records 跟 webhook_raw（webhook log 給 dashboard 看漏單統計）
+        subprocess.run(["git", "-C", str(repo), "add",
+                        "logs/trade_records.csv", "logs/webhook_raw.csv"],
+                       check=True, capture_output=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", f"trade: {ts}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            logger.info("[Git] 無變更，略過 push")
+            return
+    except Exception as e:
+        logger.warning(f"[Git] commit 失敗: {e}")
+        return
+
+    # push with retry
+    for attempt in range(1, 4):
+        try:
+            subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
+            logger.info("[Git] CSV pushed to GitHub")
+            return
+        except Exception as e:
+            logger.warning(f"[Git] push 失敗 (attempt {attempt}/3): {e}")
+            if attempt < 3:
+                time.sleep(5)
+
+def _push_pending_commits():
+    """啟動時補推上次重啟前未 push 的 commit"""
+    try:
+        repo = Path(__file__).parent
+        result = subprocess.run(
+            ["git", "-C", str(repo), "push"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            logger.info("[Git] 啟動補推完成")
+        else:
+            logger.info("[Git] 啟動補推：無待推 commit 或失敗")
+    except Exception as e:
+        logger.warning(f"[Git] 啟動補推失敗: {e}")
+
+# ==========================================
+# 2.5 帳戶餘額快照 (日盤收 13:46、夜盤收 05:01)
+# ==========================================
 BALANCE_CSV = "logs/balance_log.csv"
 BALANCE_HEADERS = [
     "datetime", "session",
@@ -161,64 +263,10 @@ def balance_logger_thread():
         if len(logged) > 20:
             logged = set(list(logged)[-10:])
 
-
-def init_trade_csv():
-    path = Path(TRADE_CSV)
-    if not path.exists():
-        with open(TRADE_CSV, 'w', newline='', encoding='utf-8-sig') as f:
-            csv.DictWriter(f, fieldnames=TRADE_HEADERS).writeheader()
-
-def append_trade_csv(record: dict):
-    with open(TRADE_CSV, 'a', newline='', encoding='utf-8-sig') as f:
-        csv.DictWriter(f, fieldnames=TRADE_HEADERS).writerow(record)
-    threading.Thread(target=_git_push_csv, daemon=True).start()
-
-def _git_push_csv():
-    repo = Path(__file__).parent
-    ts = datetime.now(TZ_TW).strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        subprocess.run(["git", "-C", str(repo), "add", "logs/trade_records.csv"],
-                       check=True, capture_output=True)
-        result = subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", f"trade: {ts}"],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            logger.info("[Git] 無變更，略過 push")
-            return
-    except Exception as e:
-        logger.warning(f"[Git] commit 失敗: {e}")
-        return
-
-    # push with retry
-    for attempt in range(1, 4):
-        try:
-            subprocess.run(["git", "-C", str(repo), "push"], check=True, capture_output=True)
-            logger.info("[Git] CSV pushed to GitHub")
-            return
-        except Exception as e:
-            logger.warning(f"[Git] push 失敗 (attempt {attempt}/3): {e}")
-            if attempt < 3:
-                time.sleep(5)
-
-def _push_pending_commits():
-    """啟動時補推上次重啟前未 push 的 commit"""
-    try:
-        repo = Path(__file__).parent
-        result = subprocess.run(
-            ["git", "-C", str(repo), "push"],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            logger.info("[Git] 啟動補推完成")
-        else:
-            logger.info("[Git] 啟動補推：無待推 commit 或失敗")
-    except Exception as e:
-        logger.warning(f"[Git] 啟動補推失敗: {e}")
-
 init_trade_csv()
-threading.Thread(target=_push_pending_commits, daemon=True).start()
+init_webhook_log()
 init_balance_csv()
+threading.Thread(target=_push_pending_commits, daemon=True).start()
 threading.Thread(target=balance_logger_thread, daemon=True).start()
 
 # ==========================================
@@ -248,15 +296,17 @@ def get_target_delivery_month():
 def get_active_contract(api_instance):
     try:
         target_month = get_target_delivery_month()
-        tmf_contracts = [c for c in api_instance.Contracts.Futures.TMF if len(c.code) <= 5]
-        if not tmf_contracts:
+        # 排除 R1/R2 連續月合約 (delivery_month 與月合約相同，但不可下單)
+        candidates = [c for c in getattr(api_instance.Contracts.Futures, CONTRACT_SYMBOL)
+                      if len(c.code) <= 5 and c.code[3] != 'R']
+        if not candidates:
             return None
-        for c in tmf_contracts:
+        for c in candidates:
             if c.delivery_month == target_month:
                 logger.info(f"[Contract] 鎖定: {c.code} ({c.delivery_month})")
                 return c
         logger.warning(f"[Contract] 找不到 {target_month}，改用近月合約")
-        return sorted(tmf_contracts, key=lambda x: x.delivery_month)[0]
+        return sorted(candidates, key=lambda x: x.delivery_month)[0]
     except Exception as e:
         logger.error(f"[Contract Error] {e}")
         return None
@@ -335,7 +385,7 @@ def get_total_position():
         positions = api.list_positions(api.futopt_account, timeout=5000)
         total = 0
         for pos in positions:
-            if "TMF" in pos.code:
+            if CONTRACT_SYMBOL in pos.code:
                 total += pos.quantity if pos.direction == Action.Buy else -pos.quantity
         return total
     except Exception as e:
@@ -365,11 +415,12 @@ def execute_trade_alignment(target_pos, signal_price=None, ticker="Unknown"):
         try:
             contract = get_active_contract(api)
             if contract is None:
-                tmf_all = [c for c in api.Contracts.Futures.TMF if len(c.code) <= 5]
-                if tmf_all:
-                    contract = sorted(tmf_all, key=lambda x: x.delivery_month)[0]
+                fallback = [c for c in getattr(api.Contracts.Futures, CONTRACT_SYMBOL)
+                            if len(c.code) <= 5 and c.code[3] != 'R']
+                if fallback:
+                    contract = sorted(fallback, key=lambda x: x.delivery_month)[0]
             if not contract:
-                raise Exception("無法獲取 TMF 合約物件")
+                raise Exception(f"無法獲取 {CONTRACT_SYMBOL} 合約物件")
 
             logger.info(f"[Trade] {contract.code} ({contract.delivery_month}) | {order_action} {order_qty} 口")
 
@@ -383,6 +434,14 @@ def execute_trade_alignment(target_pos, signal_price=None, ticker="Unknown"):
                 account=api.futopt_account
             )
             trade = api.place_order(contract, order)
+
+            # 立即 dump 完整 trade.status / order 物件 (debug Status.Failed 原因)
+            try:
+                import pprint as _pp
+                logger.info(f"[Submit] trade.status raw = {_pp.pformat(trade.status.__dict__, compact=True)[:500]}")
+                logger.info(f"[Submit] order raw = {_pp.pformat(trade.order.__dict__, compact=True)[:500]}")
+            except Exception as _e:
+                logger.warning(f"[Submit] dump trade obj fail: {_e}")
 
             # 等待成交回報
             logger.info("等待成交回報 (2s)...")
@@ -425,7 +484,7 @@ def execute_trade_alignment(target_pos, signal_price=None, ticker="Unknown"):
                     slippage_pts = round(fill_price - signal_price, 1)   # 正 = 買貴了
                 else:
                     slippage_pts = round(signal_price - fill_price, 1)   # 正 = 賣便宜了
-                slippage_twd = slippage_pts * TMF_POINT_VALUE
+                slippage_twd = slippage_pts * POINT_VALUE
 
             # 記錄到 CSV
             record = {
@@ -470,6 +529,28 @@ def execute_trade_alignment(target_pos, signal_price=None, ticker="Unknown"):
                 line_msg += f"\n滑價：{slippage_pts:+.1f}點 ({slippage_twd:+.0f}元)"
             send_line_notify(line_msg)
 
+            # 未成交告警（IOC 市價單被拒 / 部分成交）
+            if "Filled" not in fill_status:
+                logger.warning(f"[OrderCheck] 委託未完全成交: status={fill_status}")
+                send_line_notify(
+                    f"\n⚠️ 委託未成交！status={fill_status}"
+                    f"\n目標部位 {target_pos}，請立即檢查"
+                )
+
+            # 下單後對帳：實際部位 vs 目標
+            try:
+                pos_after = get_total_position()
+                if pos_after != target_pos:
+                    logger.warning(f"[Reconcile] 下單後部位 {pos_after} != 目標 {target_pos}")
+                    send_line_notify(
+                        f"\n⚠️ 對帳異常！"
+                        f"\n實際部位：{pos_after} 口"
+                        f"\n目標部位：{target_pos} 口"
+                        f"\n請手動確認"
+                    )
+            except Exception as _e:
+                logger.warning(f"[Reconcile] 下單後部位查詢失敗: {_e}")
+
             return True, status_msg
 
         except Exception as e:
@@ -513,24 +594,37 @@ def webhook():
     if WEBHOOK_SECRET:
         if request.args.get("token", "") != WEBHOOK_SECRET:
             logger.warning("[Auth] 未授權請求，已拒絕。")
+            log_webhook_raw(request.get_json(silent=True) or {}, "REJECT_UNAUTH")
             return jsonify({"status": "error", "msg": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        log_webhook_raw({}, "REJECT_EMPTY")
+        return jsonify({"status": "error", "msg": "Empty data"}), 400
 
     # 期交所休息時間
     now = datetime.now(TZ_TW)
     if (now.hour == 13 and now.minute >= 45) or (now.hour == 14):
         logger.warning("[Signal] 休息時間，拒絕下單 (13:45-15:00)")
+        log_webhook_raw(data, "REJECT_MARKET_CLOSED")
         return jsonify({"status": "ignored", "msg": "Market Closed"}), 200
 
-    data = request.json
-    if not data:
-        return jsonify({"status": "error", "msg": "Empty data"}), 400
-
     incoming_ticker = data.get('ticker', 'Unknown')
+    order_action  = data.get('order_action', '')   # buy / sell (TV strategy.order.action)
+    order_comment = data.get('order_comment', '')  # e.g. "S_Exit", "L_Add"
+    order_id      = data.get('order_id', '')
 
     try:
         target_pos = int(data.get('target_pos', 0))
     except (TypeError, ValueError):
+        log_webhook_raw(data, "REJECT_BAD_TARGET_POS")
         return jsonify({"status": "error", "msg": "Invalid target_pos"}), 400
+
+    # 執行層 pyramiding cap：TV 送 ±4 (G lot) 時壓到 ±MAX_ABS_POS
+    raw_target = target_pos
+    target_pos = max(-MAX_ABS_POS, min(MAX_ABS_POS, target_pos))
+    if target_pos != raw_target:
+        logger.info(f"[Cap] target_pos {raw_target} -> {target_pos} (MAX_ABS_POS={MAX_ABS_POS})")
 
     # signal_price：TradingView alert 帶入 {{close}}
     try:
@@ -539,26 +633,30 @@ def webhook():
         signal_price = None
 
     # 重複信號防護 (5 秒內相同目標部位)
+    # NOTE: 已知問題 - 同 K bar 多 fill 若 target_pos 一樣會被誤殺，待 review
     global _last_signal_time, _last_signal_target
     with _last_signal_lock:
         if (_last_signal_target == target_pos and
                 _last_signal_time is not None and
                 (now - _last_signal_time).total_seconds() < 5):
-            logger.warning(f"[Signal] 重複信號略過: target_pos={target_pos}")
+            logger.warning(f"[Signal] 重複信號略過: target_pos={target_pos} comment={order_comment}")
+            log_webhook_raw(data, f"DEDUP_DROPPED")
             return jsonify({"status": "ignored", "msg": "Duplicate signal"}), 200
         _last_signal_time   = now
         _last_signal_target = target_pos
 
-    logger.info(f"[Signal] {incoming_ticker} | target={target_pos} | signal_price={signal_price}")
+    logger.info(f"[Signal] {incoming_ticker} | target={target_pos} | sig_price={signal_price} | "
+                f"action={order_action} | comment={order_comment} | id={order_id}")
 
     try:
         success, detail = execute_trade_alignment(target_pos, signal_price=signal_price, ticker=incoming_ticker)
         status = "success" if success else "warning"
-        code   = 200
-        return jsonify({"status": status, "detail": str(detail)}), code
+        log_webhook_raw(data, f"EXECUTED:{status}")
+        return jsonify({"status": status, "detail": str(detail)}), 200
     except Exception as e:
         logger.critical(f"[Critical] {e}")
         send_line_notify(f"\n🔥 系統崩潰！\n{e}")
+        log_webhook_raw(data, f"ERROR:{str(e)[:100]}")
         return jsonify({"status": "error", "msg": str(e)}), 500
 
 # ==========================================
@@ -602,7 +700,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>TMF 交易紀錄</h1>
+<h1>{{ symbol }} 交易紀錄</h1>
 <div class="nav">
   <a href="{{ prev_url }}">&lt;</a>
   <span class="cur">{{ date }}</span>
@@ -667,15 +765,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
-
-@app.route('/api/balance/snapshot', methods=['POST'])
-def api_balance_snapshot():
-    if WEBHOOK_SECRET and request.args.get('token', '') != WEBHOOK_SECRET:
-        return jsonify({'status': 'error', 'msg': 'Unauthorized'}), 401
-    import threading
-    threading.Thread(target=log_balance_snapshot, args=('手動',), daemon=True).start()
-    return jsonify({'status': 'ok', 'msg': 'snapshot triggered'})
-
 @app.route('/dashboard')
 def dashboard():
     if WEBHOOK_SECRET and request.args.get("token", "") != WEBHOOK_SECRET:
@@ -721,6 +810,7 @@ def dashboard():
 
     from jinja2 import Template
     html = Template(DASHBOARD_HTML).render(
+        symbol=CONTRACT_SYMBOL,
         date=date_str,
         prev_url=prev_url,
         next_url=next_url,
