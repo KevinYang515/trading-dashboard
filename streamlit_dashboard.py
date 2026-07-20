@@ -291,29 +291,81 @@ if page == "📊 TMF 交易紀錄":
                          use_container_width=True, hide_index=True)
 
         st.divider()
-        st.subheader("歷史帳戶餘額（元）")
+        st.subheader("期間績效")
         bal_df = load_balance_data()
-        if not bal_df.empty:
+        if bal_df.empty:
+            st.info("尚無帳戶餘額資料（每日 13:46 及 05:01 自動記錄）")
+        else:
             daily_bal = (bal_df.sort_values("datetime").groupby("date").last().reset_index())
-            daily_bal["date"] = daily_bal["date"].astype(str)
-            daily_bal = daily_bal.set_index("date")
+            daily_bal["date"] = pd.to_datetime(daily_bal["date"])
+
             col_a, col_b = st.columns(2)
             with col_a:
                 st.metric("最新權益數", f"{int(daily_bal['equity'].iloc[-1]):,} 元")
             with col_b:
                 st.metric("可動用保證金", f"{int(daily_bal['available_margin'].iloc[-1]):,} 元")
-            st.line_chart(daily_bal[["equity"]], height=220)
-            st.caption("每日帳戶明細")
-            show_cols = ["equity", "today_balance", "future_settle_profitloss",
-                         "future_open_position", "available_margin", "session"]
-            st.dataframe(daily_bal[show_cols].rename(columns={
-                "equity": "權益數", "today_balance": "本日餘額",
-                "future_settle_profitloss": "期貨平倉損益",
-                "future_open_position": "浮動損益",
-                "available_margin": "可動用保證金", "session": "時段"}),
-                use_container_width=True)
-        else:
-            st.info("尚無帳戶餘額資料（每日 13:46 及 05:01 自動記錄）")
+
+            min_d = daily_bal["date"].min().date()
+            max_d = daily_bal["date"].max().date()
+            default_start = max(min_d, max_d - timedelta(days=30))
+
+            range_val = st.date_input(
+                "選擇區間（起始～結束日期）",
+                value=(default_start, max_d),
+                min_value=min_d, max_value=max_d,
+            )
+            if isinstance(range_val, tuple) and len(range_val) == 2:
+                start_d, end_d = range_val
+            else:
+                start_d, end_d = default_start, max_d
+
+            mask = (daily_bal["date"].dt.date >= start_d) & (daily_bal["date"].dt.date <= end_d)
+            period = daily_bal[mask].copy().sort_values("date")
+
+            if period.empty:
+                st.info("此區間無帳戶資料")
+            else:
+                filled_all = df[df["order_status"].str.contains("Filled", na=False)]
+                daily_pnl = {}
+                for d, day_trades in filled_all.groupby("date"):
+                    if start_d <= d <= end_d:
+                        pnl, _, _ = calc_pnl(day_trades.sort_values("datetime"))
+                        daily_pnl[d] = pnl
+
+                start_equity = float(period["equity"].iloc[0])
+                end_equity = float(period["equity"].iloc[-1])
+                chg = end_equity - start_equity
+                chg_pct = (chg / start_equity * 100) if start_equity else 0.0
+                total_realized = sum(daily_pnl.values())
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("期間報酬（權益變化）", f"{int(chg):+,} 元", f"{chg_pct:+.2f}%")
+                m2.metric("期間已實現損益", f"{int(total_realized):+,} 元")
+                m3.metric("起始權益", f"{int(start_equity):,} 元")
+                m4.metric("結束權益", f"{int(end_equity):,} 元")
+
+                chart_df = period.set_index(period["date"].dt.strftime("%Y-%m-%d"))[["equity"]]
+                chart_df.columns = ["權益數"]
+                st.line_chart(chart_df, height=260)
+
+                table = period[["date", "equity"]].copy()
+                table["當日已實現損益"] = table["date"].dt.date.map(lambda d: daily_pnl.get(d, 0.0))
+                table["權益變化"] = table["equity"].diff()
+                table.loc[table.index[0], "權益變化"] = table["equity"].iloc[0] - start_equity
+                table["累積報酬"] = table["equity"] - start_equity
+                table["累積報酬%"] = (table["累積報酬"] / start_equity * 100) if start_equity else 0.0
+                table["date"] = table["date"].dt.strftime("%Y-%m-%d")
+                table = table.rename(columns={"date": "日期", "equity": "權益數"})
+                for col in ["權益數", "當日已實現損益", "權益變化", "累積報酬"]:
+                    table[col] = table[col].round(0).astype(int)
+                table["累積報酬%"] = table["累積報酬%"].round(2)
+
+                st.dataframe(table.sort_values("日期", ascending=False),
+                             use_container_width=True, hide_index=True)
+
+                csv_bytes = table.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("下載此區間 CSV", csv_bytes,
+                                    file_name=f"tmf_pnl_{start_d}_{end_d}.csv", mime="text/csv")
 
         st.caption("資料每次成交後自動更新 · 快取 60 秒")
 
