@@ -214,6 +214,65 @@ def calc_pnl(trades):
     return realized, position, avg_cost
 
 
+def build_trade_ledger(df):
+    """依成交時間序列跑一次 FIFO，正確處理跨日持倉的均價結轉。
+    只用 trade_records.csv（webhook 下的單），不含帳戶內其他場外部位。
+
+    每一列都用 pos_before/target_pos（下單當下實際查詢到的部位）校正持倉，
+    不能只靠 BUY/SELL 數量累加——歷史上有 ~13 次重試/人工介入造成的不連續，
+    純累加會讓部位一路飄走（實測飄到 -12～-15 口，但 target_pos 其實都在 ±3 內）。
+    """
+    filled = df[df["order_status"].str.contains("Filled", na=False)].sort_values("datetime").copy()
+    if filled.empty:
+        filled["realized_pnl"] = []
+        filled["running_pos"] = []
+        filled["running_avg_cost"] = []
+        return filled
+
+    position, avg_cost = 0, 0.0
+    realized_list, pos_list, cost_list = [], [], []
+    for _, row in filled.iterrows():
+        price = row["fill_price"]
+        pos_before = row["pos_before"]
+        pos_after = row["target_pos"]
+        if pd.isna(pos_before) or pd.isna(pos_after):
+            realized_list.append(0.0)
+            pos_list.append(position)
+            cost_list.append(avg_cost)
+            continue
+        pos_before, pos_after = int(pos_before), int(pos_after)
+
+        if pos_before != position:
+            # 與帳戶實際部位不連續（重試/人工介入）：以 pos_before 為準重新校正，
+            # 這段落差的成本基礎未知，視為新倉起算
+            position = pos_before
+            avg_cost = price if (pos_before != 0 and pd.notna(price)) else 0.0
+
+        delta = pos_after - pos_before
+        realized = 0.0
+        if delta != 0 and pd.notna(price):
+            if position == 0:
+                avg_cost = price
+            elif (position > 0 and delta > 0) or (position < 0 and delta < 0):
+                avg_cost = (avg_cost * abs(position) + price * abs(delta)) / abs(position + delta)
+            else:
+                close_qty = min(abs(delta), abs(position))
+                if position > 0:
+                    realized = (price - avg_cost) * close_qty * TMF_POINT_VALUE
+                else:
+                    realized = (avg_cost - price) * close_qty * TMF_POINT_VALUE
+                if abs(delta) > abs(position):
+                    avg_cost = price  # 反手：剩餘口數以本次成交價開新倉
+        position = pos_after
+        realized_list.append(realized)
+        pos_list.append(position)
+        cost_list.append(avg_cost)
+    filled["realized_pnl"] = realized_list
+    filled["running_pos"] = pos_list
+    filled["running_avg_cost"] = cost_list
+    return filled
+
+
 # ── 頁面架構 ────────────────────────────────────────────
 st.title("📈 TMF 交易系統")
 
@@ -249,7 +308,10 @@ if page == "📊 TMF 交易紀錄":
         day_df = df[df["date"] == selected_date].copy()
         filled = day_df[day_df["order_status"].str.contains("Filled", na=False)]
 
-        realized_pnl, _, avg_cost = calc_pnl(filled)
+        ledger = build_trade_ledger(df)
+        day_ledger = ledger[ledger["date"] == selected_date]
+        realized_pnl = day_ledger["realized_pnl"].sum() if not day_ledger.empty else 0.0
+        avg_cost = float(day_ledger.iloc[-1]["running_avg_cost"]) if not day_ledger.empty else 0.0
         cur_pos = int(filled.iloc[-1]["target_pos"]) if not filled.empty else 0
 
         c1, c2, c3, c4 = st.columns(4)
@@ -291,22 +353,15 @@ if page == "📊 TMF 交易紀錄":
                          use_container_width=True, hide_index=True)
 
         st.divider()
-        st.subheader("期間績效")
-        bal_df = load_balance_data()
-        if bal_df.empty:
-            st.info("尚無帳戶餘額資料（每日 13:46 及 05:01 自動記錄）")
+        st.subheader("期間績效（僅計入 TV 訊號透過 webhook 下的單）")
+        st.caption("⚠️ 帳戶內若有本策略以外的場外部位（人工下單），不會出現在這裡；"
+                   "只算 trade_records.csv 裡的已實現損益，不用帳戶總權益。")
+
+        if ledger.empty:
+            st.info("尚無成交紀錄")
         else:
-            daily_bal = (bal_df.sort_values("datetime").groupby("date").last().reset_index())
-            daily_bal["date"] = pd.to_datetime(daily_bal["date"])
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric("最新權益數", f"{int(daily_bal['equity'].iloc[-1]):,} 元")
-            with col_b:
-                st.metric("可動用保證金", f"{int(daily_bal['available_margin'].iloc[-1]):,} 元")
-
-            min_d = daily_bal["date"].min().date()
-            max_d = daily_bal["date"].max().date()
+            min_d = ledger["date"].min()
+            max_d = ledger["date"].max()
             default_start = max(min_d, max_d - timedelta(days=30))
 
             range_val = st.date_input(
@@ -319,46 +374,35 @@ if page == "📊 TMF 交易紀錄":
             else:
                 start_d, end_d = default_start, max_d
 
-            mask = (daily_bal["date"].dt.date >= start_d) & (daily_bal["date"].dt.date <= end_d)
-            period = daily_bal[mask].copy().sort_values("date")
+            range_ledger = ledger[(ledger["date"] >= start_d) & (ledger["date"] <= end_d)]
 
-            if period.empty:
-                st.info("此區間無帳戶資料")
+            if range_ledger.empty:
+                st.info("此區間無成交紀錄")
             else:
-                filled_all = df[df["order_status"].str.contains("Filled", na=False)]
-                daily_pnl = {}
-                for d, day_trades in filled_all.groupby("date"):
-                    if start_d <= d <= end_d:
-                        pnl, _, _ = calc_pnl(day_trades.sort_values("datetime"))
-                        daily_pnl[d] = pnl
-
-                start_equity = float(period["equity"].iloc[0])
-                end_equity = float(period["equity"].iloc[-1])
-                chg = end_equity - start_equity
-                chg_pct = (chg / start_equity * 100) if start_equity else 0.0
-                total_realized = sum(daily_pnl.values())
+                daily_pnl = range_ledger.groupby("date")["realized_pnl"].sum().sort_index()
+                total_realized = daily_pnl.sum()
+                n_trade_days = int((daily_pnl != 0).sum())
+                best_day = daily_pnl.max()
+                worst_day = daily_pnl.min()
 
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("期間報酬（權益變化）", f"{int(chg):+,} 元", f"{chg_pct:+.2f}%")
-                m2.metric("期間已實現損益", f"{int(total_realized):+,} 元")
-                m3.metric("起始權益", f"{int(start_equity):,} 元")
-                m4.metric("結束權益", f"{int(end_equity):,} 元")
+                m1.metric("期間已實現損益", f"{int(total_realized):+,} 元")
+                m2.metric("有平倉的交易日數", f"{n_trade_days} 天")
+                m3.metric("最佳單日", f"{int(best_day):+,} 元")
+                m4.metric("最差單日", f"{int(worst_day):+,} 元")
 
-                chart_df = period.set_index(period["date"].dt.strftime("%Y-%m-%d"))[["equity"]]
-                chart_df.columns = ["權益數"]
+                cum = daily_pnl.cumsum()
+                chart_df = pd.DataFrame({"累積已實現損益": cum})
+                chart_df.index = [d.strftime("%Y-%m-%d") for d in chart_df.index]
                 st.line_chart(chart_df, height=260)
 
-                table = period[["date", "equity"]].copy()
-                table["當日已實現損益"] = table["date"].dt.date.map(lambda d: daily_pnl.get(d, 0.0))
-                table["權益變化"] = table["equity"].diff()
-                table.loc[table.index[0], "權益變化"] = table["equity"].iloc[0] - start_equity
-                table["累積報酬"] = table["equity"] - start_equity
-                table["累積報酬%"] = (table["累積報酬"] / start_equity * 100) if start_equity else 0.0
-                table["date"] = table["date"].dt.strftime("%Y-%m-%d")
-                table = table.rename(columns={"date": "日期", "equity": "權益數"})
-                for col in ["權益數", "當日已實現損益", "權益變化", "累積報酬"]:
-                    table[col] = table[col].round(0).astype(int)
-                table["累積報酬%"] = table["累積報酬%"].round(2)
+                fill_counts = range_ledger.groupby("date").size()
+                table = pd.DataFrame({
+                    "當日已實現損益": daily_pnl.round(0).astype(int),
+                    "累積已實現損益": cum.round(0).astype(int),
+                    "成交筆數": fill_counts,
+                }).reset_index().rename(columns={"date": "日期"})
+                table["日期"] = table["日期"].astype(str)
 
                 st.dataframe(table.sort_values("日期", ascending=False),
                              use_container_width=True, hide_index=True)
@@ -366,6 +410,20 @@ if page == "📊 TMF 交易紀錄":
                 csv_bytes = table.to_csv(index=False).encode("utf-8-sig")
                 st.download_button("下載此區間 CSV", csv_bytes,
                                     file_name=f"tmf_pnl_{start_d}_{end_d}.csv", mime="text/csv")
+
+        st.divider()
+        st.subheader("帳戶總覽")
+        st.caption("⚠️ 這裡的權益數是永豐總帳戶餘額，包含本策略以外的場外部位，不代表策略績效")
+        bal_df = load_balance_data()
+        if bal_df.empty:
+            st.info("尚無帳戶餘額資料（每日 13:46 及 05:01 自動記錄）")
+        else:
+            daily_bal = (bal_df.sort_values("datetime").groupby("date").last().reset_index())
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("最新權益數", f"{int(daily_bal['equity'].iloc[-1]):,} 元")
+            with col_b:
+                st.metric("可動用保證金", f"{int(daily_bal['available_margin'].iloc[-1]):,} 元")
 
         st.caption("資料每次成交後自動更新 · 快取 60 秒")
 
