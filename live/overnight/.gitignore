@@ -1,0 +1,6 @@
+finlab_db/
+logs/
+__pycache__/
+*.pyc
+*.bak_*
+shioaji.log
