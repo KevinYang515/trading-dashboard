@@ -15,3 +15,4 @@ shioaji.log
 pyvenv.cfg
 lib/
 lib64
+.env.bak*

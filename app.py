@@ -330,40 +330,33 @@ def perform_login():
 perform_login()
 
 def _check_position_on_startup():
-    """啟動時比對 CSV 預期部位 vs 永豐實際部位，不一致時發 Line 通知"""
+    """啟動時比對 CSV 預期部位 vs 永豐實際部位（登入後延遲 30 秒，失敗每 30 秒重試，最多 5 次；只寫 log）"""
+    expected_pos = 0
     try:
-        # 讀 CSV 最後一筆的 target_pos 當作「預期部位」
-        expected_pos = 0
         path = Path(TRADE_CSV)
         if path.exists():
             with open(TRADE_CSV, 'r', encoding='utf-8-sig') as f:
                 rows = list(csv.DictReader(f))
             if rows:
-                try:
-                    expected_pos = int(float(rows[-1]['target_pos']))
-                except (ValueError, KeyError):
-                    expected_pos = 0
+                expected_pos = int(float(rows[-1]['target_pos']))
+    except Exception:
+        expected_pos = 0
 
-        # 查永豐實際部位
-        actual_pos = get_total_position()
-        logger.info(f"[Startup] CSV預期={expected_pos}, 永豐實際={actual_pos}")
-
+    time.sleep(30)
+    for attempt in range(1, 6):
+        try:
+            actual_pos = get_total_position()
+        except Exception as e:
+            logger.warning(f"[Startup] 部位比對失敗 (第{attempt}次): {e}")
+            time.sleep(30)
+            continue
+        logger.info(f"[Startup] CSV預期={expected_pos}, 永豐實際={actual_pos} (第{attempt}次)")
         if actual_pos != expected_pos:
-            diff = actual_pos - expected_pos
-            msg = (
-                f"\n⚠️ 啟動部位不一致！"
-                f"\nCSV 預期：{expected_pos:+d} 口"
-                f"\n永豐實際：{actual_pos:+d} 口"
-                f"\n差異：{diff:+d} 口"
-                f"\n請確認後手動處理"
-            )
             logger.warning(f"[Startup] 部位不一致！預期={expected_pos}, 實際={actual_pos}")
-            send_line_notify(msg)
         else:
             logger.info(f"[Startup] 部位一致：{actual_pos} 口 ✓")
-
-    except Exception as e:
-        logger.warning(f"[Startup] 部位比對失敗: {e}")
+        return
+    logger.warning("[Startup] 部位比對 5 次都失敗，請手動確認部位")
 
 threading.Thread(target=_check_position_on_startup, daemon=True).start()
 
@@ -825,4 +818,4 @@ def dashboard():
 
 if __name__ == '__main__':
     threading.Thread(target=keep_alive_and_check_token, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='127.0.0.1', port=5000, debug=False)
